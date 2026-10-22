@@ -1,0 +1,10 @@
+[weights]
+trend = 2.0
+momentum = 2.0
+volume = 1.0
+structure = 2.0
+
+[thresholds]
+buy = 3.5
+sell = -3.5
+
