@@ -84,15 +84,28 @@ def resolve_ticker(query: str, universe: pd.DataFrame | None = None) -> tuple[st
     return q.upper(), q, "미확인"
 
 @st.cache_data(ttl=900, show_spinner=False)
-def load_data(ticker: str) -> tuple[pd.DataFrame, datetime]:
+def load_data(ticker: str) -> tuple[pd.DataFrame, datetime, str]:
     end = datetime.now() + timedelta(days=1)
     start = end - timedelta(days=365 * 5 + 20)
-    raw = yf.download(ticker, start=start.date(), end=end.date(), auto_adjust=False, progress=False)
-    if raw is None or raw.empty:
-        raise ValueError("데이터가 비어 있습니다. 종목코드 또는 데이터 제공처 응답을 확인하세요.")
-    if isinstance(raw.columns, pd.MultiIndex):
-        raw.columns = raw.columns.get_level_values(0)
-    raw = raw.rename(columns={"Adj Close": "Adj_Close"})
+    yahoo_error = None
+    try:
+        raw = yf.download(ticker, start=start.date(), end=end.date(), auto_adjust=False, progress=False, threads=False)
+        if raw is None or raw.empty:
+            raise ValueError("Yahoo Finance 응답이 비어 있습니다.")
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = raw.columns.get_level_values(0)
+        raw = raw.rename(columns={"Adj Close": "Adj_Close"})
+        source = "Yahoo Finance (yfinance)"
+    except Exception as exc:
+        yahoo_error = str(exc)
+        code = ticker.split(".")[0]
+        try:
+            raw = fdr.DataReader(code, start=start.date(), end=end.date())
+            if raw is None or raw.empty:
+                raise ValueError("FinanceDataReader 응답이 비어 있습니다.")
+            source = "FinanceDataReader 국내 일봉 대체 조회"
+        except Exception as fallback_exc:
+            raise ValueError(f"Yahoo Finance와 대체 데이터 조회가 모두 실패했습니다. Yahoo: {yahoo_error}; 대체: {fallback_exc}") from fallback_exc
     needed = ["Open", "High", "Low", "Close", "Volume"]
     missing = [c for c in needed if c not in raw.columns]
     if missing:
@@ -102,7 +115,7 @@ def load_data(ticker: str) -> tuple[pd.DataFrame, datetime]:
     df.index = pd.to_datetime(df.index).tz_localize(None)
     df = df.apply(pd.to_numeric, errors="coerce").dropna(subset=needed)
     df["Turnover"] = df["Close"] * df["Volume"]
-    return df, datetime.now()
+    return df, datetime.now(), source
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     x = df.copy()
@@ -185,11 +198,11 @@ if run_analysis or query:
     try:
         universe = load_universe()
         ticker, display_name, market = resolve_ticker(query, universe)
-        data, fetched_at = load_data(ticker)
+        data, fetched_at, data_source = load_data(ticker)
         x = add_indicators(data)
         label, score, reasons = verdict(x)
         recent = x.tail(252)
-        st.markdown(f'<div class="status"><strong>{display_name}</strong> · {ticker} · {market} · 전체 {len(universe):,}개 종목 검색 가능 · 분석 기간 {data.index.min().date()} ~ {data.index.max().date()}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="status"><strong>{display_name}</strong> · {ticker} · {market} · 전체 {len(universe):,}개 종목 검색 가능 · 분석 기간 {data.index.min().date()} ~ {data.index.max().date()} · 자료원 {data_source}</div>', unsafe_allow_html=True)
         st.markdown('<div class="section-title">QUICK SUMMARY</div>', unsafe_allow_html=True)
         c1, c2, c3, c4 = st.columns(4)
         last = x.iloc[-1]
@@ -213,16 +226,16 @@ if run_analysis or query:
                 st.write(f"- {reason}")
             st.warning("가중치와 임계값은 초기 실험값입니다. 과거 데이터에 맞춘 반복 조정은 과최적화를 일으킬 수 있습니다. 백테스트 기능은 다음 단계에서 추가합니다.")
         with tab4:
-            st.write("- 제공 서비스: Yahoo Finance (yfinance 라이브러리 경유)")
-            st.write("- 원본 주소: https://finance.yahoo.com/")
+            st.write(f"- 실제 사용 자료원: {data_source}")
+            st.write("- 우선 조회 주소: https://finance.yahoo.com/ · 대체 조회: FinanceDataReader 국내 데이터 제공 경로")
             st.write(f"- 조회 시각: {fetched_at.strftime('%Y-%m-%d %H:%M:%S')} (실행 PC 시간)")
             st.write("- 데이터: 일봉 OHLCV 및 가능할 경우 수정주가(Adj Close), 약 5년 요청")
             st.write("- 지연·이용 조건: 무료 보조 데이터이며 공식 KRX 실시간/보장 API가 아닙니다. 지연·누락·수정 가능성이 있고 Yahoo Finance 이용약관과 제공 한도를 따라야 합니다.")
-            st.write("- KRX 대조: 아직 KRX 인증키가 설정되지 않아 자동 대조하지 않습니다.")
+            st.write("- KRX 대조: 종목 목록은 KRX 목록 조회를 사용하며, 가격은 Yahoo 우선·실패 시 국내 대체 경로를 사용합니다.")
             st.info("KRX Open API는 공식 일별매매정보를 제공하지만 인증키 신청이 필요합니다. 키 발급 후 공식 소스를 우선 사용하도록 연결할 수 있습니다.")
         st.download_button("분석 데이터 CSV 저장", x.to_csv(index=True).encode("utf-8-sig"), file_name=f"{ticker.replace('.', '_')}_analysis.csv", mime="text/csv")
         st.markdown('<div class="footer-note">교육·검증용 분석 도구 · 투자 권유가 아니며 실제 주문 기능은 포함하지 않습니다.</div>', unsafe_allow_html=True)
     except Exception as exc:
         st.error(f"데이터를 가져오지 못했습니다: {exc}")
-        st.info("임의의 가격 데이터는 사용하지 않았습니다. 인터넷 연결, 종목코드(예: 005930), Yahoo 응답 상태를 확인하세요.")
+        st.info("임의의 가격 데이터는 사용하지 않았습니다. 인터넷 연결, 종목코드(예: 005930), 데이터 제공처 응답 상태를 확인하세요.")
 
