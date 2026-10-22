@@ -117,54 +117,6 @@ def load_data(ticker: str) -> tuple[pd.DataFrame, datetime, str]:
     df["Turnover"] = df["Close"] * df["Volume"]
     return df, datetime.now(), source
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def load_scan_data(code: str) -> pd.DataFrame:
-    """시장 후보 검색용 국내 일봉 데이터입니다. 스캔에서는 1년 자료만 받아 호출량을 줄입니다."""
-    end = datetime.now() + timedelta(days=1)
-    start = end - timedelta(days=390)
-    raw = fdr.DataReader(code, start=start.date(), end=end.date())
-    if raw is None or raw.empty:
-        raise ValueError("일봉 자료가 비어 있습니다.")
-    needed = ["Open", "High", "Low", "Close", "Volume"]
-    if not all(c in raw.columns for c in needed):
-        raise ValueError("필수 일봉 열이 없습니다.")
-    df = raw[needed].copy()
-    df.index = pd.to_datetime(df.index).tz_localize(None)
-    return df.apply(pd.to_numeric, errors="coerce").dropna(subset=needed)
-
-def scan_market(universe: pd.DataFrame, limit: int, markets: list[str], progress_bar) -> tuple[pd.DataFrame, int]:
-    """KRX 목록을 확인해 매수 판단 후보를 점수순으로 반환합니다."""
-    candidates = universe[universe["Market"].isin(markets)].copy()
-    # 이름순으로 고정해 매번 같은 종목부터 검사하고, 사용자가 선택한 범위를 지킵니다.
-    candidates = candidates.sort_values(["Market", "Name"]).head(limit)
-    rows = []
-    failed = 0
-    for i, row in enumerate(candidates.itertuples(index=False), start=1):
-        try:
-            raw = load_scan_data(str(row.Code).zfill(6))
-            indicators = add_indicators(raw)
-            label, score, reasons = verdict(indicators)
-            last = indicators.dropna().iloc[-1]
-            previous = indicators.dropna().iloc[-2]
-            volume_ratio = float(last.Volume / last.Volume_MA20) if last.Volume_MA20 else np.nan
-            rows.append({
-                "종목명": row.Name,
-                "코드": str(row.Code).zfill(6),
-                "시장": row.Market,
-                "판단": label,
-                "등급": signal_level(label, score),
-                "점수": score,
-                "최근 종가": last.Close,
-                "RSI(14)": last.RSI14,
-                "거래량/20일평균": volume_ratio,
-                "최근 변화": "상승" if last.Close > previous.Close else "하락" if last.Close < previous.Close else "보합",
-                "근거": "; ".join(reasons),
-            })
-        except Exception:
-            failed += 1
-        progress_bar.progress(i / len(candidates), text=f"시장 종목 확인 중… {i:,}/{len(candidates):,}")
-    return pd.DataFrame(rows), failed
-
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     x = df.copy()
     for n in [5, 20, 60, 120]:
@@ -243,44 +195,6 @@ st.markdown('<div class="search-label">분석할 종목을 검색하세요</div>
 query = st.text_input("종목명 또는 6자리 종목코드", value="삼성전자", placeholder="예: 삼성전자 또는 005930")
 run_analysis = st.button("분석 실행", type="primary", use_container_width=True)
 
-with st.expander("🔎 매수 후보 찾기", expanded=False):
-    st.caption("현재 규칙 점수로 코스피 종목만 확인합니다. 결과는 투자 권유가 아닌 검토용 후보 목록입니다.")
-    scan_a, scan_b = st.columns([1.1, 1.4])
-    with scan_a:
-        scan_size_label = st.selectbox("확인할 종목 수", ["100개(빠른 확인)", "300개", "전체 시장"], index=0)
-    with scan_b:
-        run_scan = st.button("매수 후보 찾기 실행", use_container_width=True)
-    if run_scan:
-        scan_limit = {"100개(빠른 확인)": 100, "300개": 300, "전체 시장": 100000}[scan_size_label]
-        if scan_size_label == "전체 시장":
-            st.warning("현재 코스피 약 940개 종목 전체를 확인합니다. 무료 데이터 제공처 제한에 따라 수 분 이상 걸릴 수 있으며, 일부 종목은 자료 부족으로 제외될 수 있습니다.")
-        try:
-            scan_universe = load_universe()
-            progress = st.progress(0, text="코스피 종목 확인 준비 중…")
-            scan_result, failed_count = scan_market(scan_universe, scan_limit, ["KOSPI"], progress)
-            progress.empty()
-            if scan_result.empty:
-                st.info("현재 조건에서 매수 판단 종목을 찾지 못했습니다. 확인 범위를 늘려 다시 실행해 보세요.")
-            else:
-                buys = scan_result[scan_result["판단"] == "매수 판단"].sort_values("점수", ascending=False).reset_index(drop=True)
-                st.markdown(f"**코스피 매수 판단 후보 {len(buys):,}개** · 확인 성공 {len(scan_result):,}개 · 자료 부족/오류 {failed_count:,}개")
-                if buys.empty:
-                    st.info("확인한 코스피 범위에서 규칙 점수 기준을 충족한 매수 판단 종목이 없습니다.")
-                else:
-                    display = buys[["종목명", "코드", "시장", "등급", "점수", "최근 종가", "RSI(14)", "거래량/20일평균", "최근 변화"]].copy()
-                    st.dataframe(
-                        display.style.format({"점수": "+.2f", "최근 종가": "{:,.0f}", "RSI(14)": "{:.1f}", "거래량/20일평균": "{:.2f}배"}),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-                    selected_name = st.selectbox("후보의 판단 근거 보기", buys["종목명"].tolist())
-                    selected = buys[buys["종목명"] == selected_name].iloc[0]
-                    st.caption(f"{selected['종목명']}({selected['코드']}) · {selected['근거']}")
-                    st.download_button("매수 후보 CSV 저장", buys.to_csv(index=False).encode("utf-8-sig"), file_name="kospi_buy_candidates.csv", mime="text/csv")
-                st.caption(f"조회 자료원: FinanceDataReader 국내 일봉 경로 · 조회 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · 후보 점수 가중치는 검증 전 실험값입니다.")
-        except Exception as exc:
-            st.error(f"코스피 스캔에 실패했습니다: {exc}")
-            st.info("무료 데이터 제공처의 호출 제한 또는 네트워크 상태로 실패했을 수 있습니다. 잠시 후 확인할 종목 수를 줄여 다시 실행하세요.")
 if run_analysis or query:
     try:
         universe = load_universe()
