@@ -244,48 +244,43 @@ query = st.text_input("종목명 또는 6자리 종목코드", value="삼성전�
 run_analysis = st.button("분석 실행", type="primary", use_container_width=True)
 
 with st.expander("🔎 매수 후보 찾기", expanded=False):
-    st.caption("현재 규칙 점수로 KOSPI·KOSDAQ 종목을 확인합니다. 결과는 투자 권유가 아닌 검토용 후보 목록입니다.")
-    scan_a, scan_b, scan_c = st.columns([1.1, 1.1, 1.4])
+    st.caption("현재 규칙 점수로 코스피 종목만 확인합니다. 결과는 투자 권유가 아닌 검토용 후보 목록입니다.")
+    scan_a, scan_b = st.columns([1.1, 1.4])
     with scan_a:
         scan_size_label = st.selectbox("확인할 종목 수", ["100개(빠른 확인)", "300개", "전체 시장"], index=0)
     with scan_b:
-        scan_markets = st.multiselect("시장", ["KOSPI", "KOSDAQ"], default=["KOSPI", "KOSDAQ"])
-    with scan_c:
         run_scan = st.button("매수 후보 찾기 실행", use_container_width=True)
     if run_scan:
-        if not scan_markets:
-            st.warning("최소 하나의 시장을 선택하세요.")
-        else:
-            scan_limit = {"100개(빠른 확인)": 100, "300개": 300, "전체 시장": 100000}[scan_size_label]
-            if scan_size_label == "전체 시장":
-                st.warning("전체 스캔은 무료 데이터 제공처의 호출 제한에 따라 수 분 이상 걸릴 수 있으며, 일부 종목은 자료 부족으로 제외될 수 있습니다.")
-            try:
-                scan_universe = load_universe()
-                progress = st.progress(0, text="시장 종목 확인 준비 중…")
-                scan_result, failed_count = scan_market(scan_universe, scan_limit, scan_markets, progress)
-                progress.empty()
-                if scan_result.empty:
-                    st.info("현재 조건에서 매수 판단 종목을 찾지 못했습니다. 다른 시장이나 더 많은 종목을 선택해 보세요.")
+        scan_limit = {"100개(빠른 확인)": 100, "300개": 300, "전체 시장": 100000}[scan_size_label]
+        if scan_size_label == "전체 시장":
+            st.warning("현재 코스피 약 940개 종목 전체를 확인합니다. 무료 데이터 제공처 제한에 따라 수 분 이상 걸릴 수 있으며, 일부 종목은 자료 부족으로 제외될 수 있습니다.")
+        try:
+            scan_universe = load_universe()
+            progress = st.progress(0, text="코스피 종목 확인 준비 중…")
+            scan_result, failed_count = scan_market(scan_universe, scan_limit, ["KOSPI"], progress)
+            progress.empty()
+            if scan_result.empty:
+                st.info("현재 조건에서 매수 판단 종목을 찾지 못했습니다. 확인 범위를 늘려 다시 실행해 보세요.")
+            else:
+                buys = scan_result[scan_result["판단"] == "매수 판단"].sort_values("점수", ascending=False).reset_index(drop=True)
+                st.markdown(f"**코스피 매수 판단 후보 {len(buys):,}개** · 확인 성공 {len(scan_result):,}개 · 자료 부족/오류 {failed_count:,}개")
+                if buys.empty:
+                    st.info("확인한 코스피 범위에서 규칙 점수 기준을 충족한 매수 판단 종목이 없습니다.")
                 else:
-                    buys = scan_result[scan_result["판단"] == "매수 판단"].sort_values("점수", ascending=False).reset_index(drop=True)
-                    st.markdown(f"**매수 판단 후보 {len(buys):,}개** · 확인 성공 {len(scan_result):,}개 · 자료 부족/오류 {failed_count:,}개")
-                    if buys.empty:
-                        st.info("확인한 범위에서 규칙 점수 기준을 충족한 매수 판단 종목이 없습니다. 관망 종목은 개별 분석에서 확인하세요.")
-                    else:
-                        display = buys[["종목명", "코드", "시장", "등급", "점수", "최근 종가", "RSI(14)", "거래량/20일평균", "최근 변화"]].copy()
-                        st.dataframe(
-                            display.style.format({"점수": "+.2f", "최근 종가": "{:,.0f}", "RSI(14)": "{:.1f}", "거래량/20일평균": "{:.2f}배"}),
-                            use_container_width=True,
-                            hide_index=True,
-                        )
-                        selected_name = st.selectbox("후보의 판단 근거 보기", buys["종목명"].tolist())
-                        selected = buys[buys["종목명"] == selected_name].iloc[0]
-                        st.caption(f"{selected['종목명']}({selected['코드']}) · {selected['근거']}")
-                        st.download_button("매수 후보 CSV 저장", buys.to_csv(index=False).encode("utf-8-sig"), file_name="buy_candidates.csv", mime="text/csv")
-                    st.caption(f"조회 자료원: FinanceDataReader 국내 일봉 경로 · 조회 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · 후보 점수 가중치는 검증 전 실험값입니다.")
-            except Exception as exc:
-                st.error(f"시장 스캔에 실패했습니다: {exc}")
-                st.info("무료 데이터 제공처의 호출 제한 또는 네트워크 상태로 실패했을 수 있습니다. 잠시 후 확인할 종목 수를 줄여 다시 실행하세요.")
+                    display = buys[["종목명", "코드", "시장", "등급", "점수", "최근 종가", "RSI(14)", "거래량/20일평균", "최근 변화"]].copy()
+                    st.dataframe(
+                        display.style.format({"점수": "+.2f", "최근 종가": "{:,.0f}", "RSI(14)": "{:.1f}", "거래량/20일평균": "{:.2f}배"}),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    selected_name = st.selectbox("후보의 판단 근거 보기", buys["종목명"].tolist())
+                    selected = buys[buys["종목명"] == selected_name].iloc[0]
+                    st.caption(f"{selected['종목명']}({selected['코드']}) · {selected['근거']}")
+                    st.download_button("매수 후보 CSV 저장", buys.to_csv(index=False).encode("utf-8-sig"), file_name="kospi_buy_candidates.csv", mime="text/csv")
+                st.caption(f"조회 자료원: FinanceDataReader 국내 일봉 경로 · 조회 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · 후보 점수 가중치는 검증 전 실험값입니다.")
+        except Exception as exc:
+            st.error(f"코스피 스캔에 실패했습니다: {exc}")
+            st.info("무료 데이터 제공처의 호출 제한 또는 네트워크 상태로 실패했을 수 있습니다. 잠시 후 확인할 종목 수를 줄여 다시 실행하세요.")
 if run_analysis or query:
     try:
         universe = load_universe()
