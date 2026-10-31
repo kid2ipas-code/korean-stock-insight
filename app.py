@@ -67,6 +67,127 @@ def load_universe() -> pd.DataFrame:
     universe["Code"] = universe["Code"].astype(str).str.zfill(6)
     return universe.drop_duplicates("Code").sort_values(["Market", "Name"]).reset_index(drop=True)
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_kospi100_universe() -> tuple[pd.DataFrame, str]:
+    """KOSPI100 구성종목을 우선 조회하고, 실패하면 KOSPI 시총 상위 100개로 대체합니다."""
+    try:
+        components = fdr.SnapDataReader("KRX/INDEX/STOCK/1034")
+        if components is not None and not components.empty and "Code" in components.columns:
+            result = components[["Code", "Name"]].copy()
+            result["Code"] = result["Code"].astype(str).str.zfill(6)
+            return result.drop_duplicates("Code").head(100), "KRX KOSPI100 구성종목"
+    except Exception:
+        pass
+
+    # KRX 구성종목 조회가 제한된 환경에서는 시가총액 자료로 대체합니다.
+    # 이 경우 화면에 대체 기준을 명확히 표시해 공식 KOSPI100과 혼동하지 않게 합니다.
+    listing = fdr.StockListing("KRX-MARCAP")
+    if listing is None or listing.empty:
+        raise ValueError("KOSPI100 구성종목과 대체 시가총액 자료를 모두 가져오지 못했습니다.")
+    code_col = "Code" if "Code" in listing.columns else "Symbol"
+    name_col = "Name" if "Name" in listing.columns else "종목명"
+    market_col = "Market" if "Market" in listing.columns else "시장구분"
+    cap_candidates = ["Marcap", "MarketCap", "시가총액", "Marcap (억원)"]
+    cap_col = next((c for c in cap_candidates if c in listing.columns), None)
+    if not all(c in listing.columns for c in [code_col, name_col, market_col]) or cap_col is None:
+        raise ValueError("시가총액 목록의 열 구성을 확인할 수 없습니다.")
+    result = listing[listing[market_col].eq("KOSPI")][[code_col, name_col, cap_col]].copy()
+    result[cap_col] = pd.to_numeric(result[cap_col], errors="coerce")
+    result = result.dropna(subset=[cap_col]).sort_values(cap_col, ascending=False).head(100)
+    result = result.rename(columns={code_col: "Code", name_col: "Name"})[["Code", "Name"]]
+    result["Code"] = result["Code"].astype(str).str.zfill(6)
+    return result.drop_duplicates("Code"), "KRX KOSPI 시가총액 상위 100개(구성종목 대체 기준)"
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_scan_prices(tickers: tuple[str, ...]) -> dict[str, pd.DataFrame]:
+    """후보군의 최근 1년 일봉을 한 번에 받아 종목별 OHLCV로 분리합니다."""
+    end = datetime.now() + timedelta(days=1)
+    start = end - timedelta(days=365 + 30)
+    raw = yf.download(list(tickers), start=start.date(), end=end.date(), auto_adjust=False,
+                      progress=False, threads=True, group_by="ticker")
+    if raw is None or raw.empty:
+        raise ValueError("KOSPI100 후보군의 1년 일봉 데이터가 비어 있습니다.")
+    result: dict[str, pd.DataFrame] = {}
+    for ticker in tickers:
+        try:
+            if isinstance(raw.columns, pd.MultiIndex):
+                if ticker in raw.columns.get_level_values(0):
+                    frame = raw[ticker].copy()
+                else:
+                    frame = raw.xs(ticker, axis=1, level=1).copy()
+            else:
+                frame = raw.copy()
+            frame = frame.rename(columns={"Adj Close": "Adj_Close"})
+            needed = ["Open", "High", "Low", "Close", "Volume"]
+            if not all(c in frame.columns for c in needed):
+                continue
+            frame.index = pd.to_datetime(frame.index).tz_localize(None)
+            frame = frame[needed + (["Adj_Close"] if "Adj_Close" in frame else [])]
+            frame = frame.apply(pd.to_numeric, errors="coerce").dropna(subset=needed)
+            if len(frame) >= 130:
+                result[ticker] = frame
+        except Exception:
+            continue
+    return result
+
+def rank_next_day_candidate(df: pd.DataFrame) -> dict[str, float | str] | None:
+    """1년 일봉만 사용해 다음 거래일 관심도 점수를 계산합니다. 예측 보장 점수가 아닙니다."""
+    x = add_indicators(df).dropna().copy()
+    if len(x) < 120:
+        return None
+    r, p = x.iloc[-1], x.iloc[-2]
+    score = 0.0
+    score += 15 if r.Close > r.MA20 else 0
+    score += 15 if r.MA20 > r.MA60 else 0
+    score += 10 if r.MA60 > r.MA120 else 0
+    score += 10 if 45 <= r.RSI14 <= 68 else (4 if 40 <= r.RSI14 < 45 else 0)
+    score += 5 if r.RSI14 > p.RSI14 else 0
+    score += 10 if r.MACD > r.MACD_Signal else 0
+    score += 5 if r.MACD_Hist > p.MACD_Hist else 0
+    volume_ratio = r.Volume / r.Volume_MA20 if r.Volume_MA20 else np.nan
+    score += 10 if 1.0 <= volume_ratio <= 3.0 else (4 if volume_ratio > 0.8 else 0)
+    score += 5 if r.Close > r.BB_Mid else 0
+    high_60 = x.High.shift(1).rolling(60).max().iloc[-1]
+    score += 10 if pd.notna(high_60) and r.Close >= high_60 * 0.98 else 0
+    return_20 = r.Close / x.Close.iloc[-21] - 1 if len(x) >= 21 else np.nan
+    score += 5 if return_20 > 0 else 0
+    atr_ratio = r.ATR14 / r.Close if r.Close else np.nan
+    score += 5 if pd.notna(atr_ratio) and atr_ratio <= 0.05 else 0
+    caution = "추세·모멘텀 양호" if score >= 70 else "일부 신호 확인 필요"
+    return {
+        "점수": round(min(score, 100), 1),
+        "최근일": x.index[-1].strftime("%Y-%m-%d"),
+        "종가": float(r.Close),
+        "20일 수익률": float(return_20),
+        "RSI(14)": float(r.RSI14),
+        "거래량/20일평균": float(volume_ratio),
+        "의견": caution,
+        "차트": x[["Close"]].tail(252).copy(),
+    }
+
+def build_next_day_top10(kospi100: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    tickers = tuple(f"{code}.KS" for code in kospi100["Code"])
+    price_map = load_scan_prices(tickers)
+    name_map = dict(zip(kospi100["Code"], kospi100["Name"]))
+    rows, chart_frames = [], []
+    for ticker, frame in price_map.items():
+        item = rank_next_day_candidate(frame)
+        if item is None:
+            continue
+        code = ticker.split(".")[0]
+        item["종목"] = name_map.get(code, code)
+        item["코드"] = code
+        chart = item.pop("차트")
+        chart.columns = [item["종목"]]
+        chart_frames.append(chart)
+        rows.append(item)
+    if not rows:
+        raise ValueError("분석 가능한 1년 일봉을 받은 종목이 없습니다.")
+    table = pd.DataFrame(rows).sort_values(["점수", "20일 수익률"], ascending=False).head(10).reset_index(drop=True)
+    selected = set(table["코드"])
+    charts = pd.concat([c for c in chart_frames if c.columns[0] in set(table["종목"])], axis=1).sort_index()
+    return table, charts, max(price_map[t].index.max() for t in price_map).strftime("%Y-%m-%d")
+
 def resolve_ticker(query: str, universe: pd.DataFrame | None = None) -> tuple[str, str, str]:
     q = query.strip()
     key = q.lower().replace(" ", "")
@@ -239,4 +360,33 @@ if run_analysis or query:
     except Exception as exc:
         st.error(f"데이터를 가져오지 못했습니다: {exc}")
         st.info("임의의 가격 데이터는 사용하지 않았습니다. 인터넷 연결, 종목코드(예: 005930), 데이터 제공처 응답 상태를 확인하세요.")
+
+st.markdown('<div class="section-title">NEXT TRADING DAY TOP 10</div>', unsafe_allow_html=True)
+st.subheader("다음 거래일 관심종목 TOP 10")
+st.caption("최근 장 마감일까지의 1년 일봉을 분석해 기술적 조건 점수가 높은 종목을 표시합니다. 상승을 보장하는 추천이 아니며, 데이터가 늦게 확정되면 기준일이 직전 거래일로 표시됩니다.")
+try:
+    with st.spinner("KOSPI100 후보군의 최근 1년 데이터를 분석하고 있습니다..."):
+        kospi100, universe_source = load_kospi100_universe()
+        top10, top10_charts, as_of = build_next_day_top10(kospi100)
+    st.caption(f"기준일: {as_of} · 분석 후보: {len(kospi100)}개 · 종목군 자료원: {universe_source} · 가격 자료원: Yahoo Finance(yfinance)")
+    display_top10 = top10[["종목", "코드", "점수", "의견", "종가", "20일 수익률", "RSI(14)", "거래량/20일평균"]].copy()
+    st.dataframe(
+        display_top10.style.format({
+            "종가": "{:,.0f}원",
+            "20일 수익률": "{:.2%}",
+            "RSI(14)": "{:.1f}",
+            "거래량/20일평균": "{:.2f}배",
+            "점수": "{:.1f}",
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
+    if not top10_charts.empty:
+        normalized = top10_charts / top10_charts.iloc[0] * 100
+        st.caption("TOP 10 종목의 최근 1년 주가 흐름 비교(각 종목의 시작값=100)")
+        st.line_chart(normalized, height=360, use_container_width=True)
+    st.info("점수는 추세·RSI·MACD·거래량·볼린저 밴드·60일 고점 접근·변동성을 조합한 초기 실험 규칙입니다. 뉴스·공시·실적·갭 하락은 충분히 반영하지 못하므로 실제 매수 전 별도 확인이 필요합니다.")
+except Exception as exc:
+    st.warning(f"관심종목 TOP 10을 계산하지 못했습니다: {exc}")
+    st.info("임의의 종목이나 가격은 표시하지 않았습니다. 다음 거래일에 다시 실행하거나 데이터 제공처 상태를 확인하세요.")
 
