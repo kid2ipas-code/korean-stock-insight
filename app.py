@@ -360,8 +360,6 @@ try:
             use_container_width=True,
             hide_index=True,
         )
-        st.caption("조건 종목의 최근 60거래일 종가와 20일 이동평균선")
-        st.line_chart(declining_charts, height=380, use_container_width=True)
     st.info("검색 조건은 ‘최근 종가 < 20일 단순이동평균’ 그리고 ‘최근 4거래일 종가가 매일 전일보다 낮음’입니다. 조건 충족은 추가 하락을 의미하지 않으며, 공시·실적·시장 상황을 별도로 확인해야 합니다.")
 except Exception as exc:
     st.warning(f"조건 검색을 계산하지 못했습니다: {exc}")
