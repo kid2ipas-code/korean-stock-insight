@@ -130,62 +130,40 @@ def load_scan_prices(tickers: tuple[str, ...]) -> dict[str, pd.DataFrame]:
             continue
     return result
 
-def rank_next_day_candidate(df: pd.DataFrame) -> dict[str, float | str] | None:
-    """1년 일봉만 사용해 다음 거래일 관심도 점수를 계산합니다. 예측 보장 점수가 아닙니다."""
-    x = add_indicators(df).dropna().copy()
-    if len(x) < 120:
-        return None
-    r, p = x.iloc[-1], x.iloc[-2]
-    score = 0.0
-    score += 15 if r.Close > r.MA20 else 0
-    score += 15 if r.MA20 > r.MA60 else 0
-    score += 10 if r.MA60 > r.MA120 else 0
-    score += 10 if 45 <= r.RSI14 <= 68 else (4 if 40 <= r.RSI14 < 45 else 0)
-    score += 5 if r.RSI14 > p.RSI14 else 0
-    score += 10 if r.MACD > r.MACD_Signal else 0
-    score += 5 if r.MACD_Hist > p.MACD_Hist else 0
-    volume_ratio = r.Volume / r.Volume_MA20 if r.Volume_MA20 else np.nan
-    score += 10 if 1.0 <= volume_ratio <= 3.0 else (4 if volume_ratio > 0.8 else 0)
-    score += 5 if r.Close > r.BB_Mid else 0
-    high_60 = x.High.shift(1).rolling(60).max().iloc[-1]
-    score += 10 if pd.notna(high_60) and r.Close >= high_60 * 0.98 else 0
-    return_20 = r.Close / x.Close.iloc[-21] - 1 if len(x) >= 21 else np.nan
-    score += 5 if return_20 > 0 else 0
-    atr_ratio = r.ATR14 / r.Close if r.Close else np.nan
-    score += 5 if pd.notna(atr_ratio) and atr_ratio <= 0.05 else 0
-    caution = "추세·모멘텀 양호" if score >= 70 else "일부 신호 확인 필요"
-    return {
-        "점수": round(min(score, 100), 1),
-        "최근일": x.index[-1].strftime("%Y-%m-%d"),
-        "종가": float(r.Close),
-        "20일 수익률": float(return_20),
-        "RSI(14)": float(r.RSI14),
-        "거래량/20일평균": float(volume_ratio),
-        "의견": caution,
-        "차트": x[["Close"]].tail(252).copy(),
-    }
-
-def build_next_day_top10(kospi100: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, str]:
+def find_declining_below_ma20(kospi100: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    """KOSPI 상위 100개 중 20일선 아래이며 최근 4거래일 연속 하락한 종목을 찾습니다."""
     tickers = tuple(f"{code}.KS" for code in kospi100["Code"])
     price_map = load_scan_prices(tickers)
     name_map = dict(zip(kospi100["Code"], kospi100["Name"]))
     rows, chart_frames = [], []
     for ticker, frame in price_map.items():
-        item = rank_next_day_candidate(frame)
-        if item is None:
+        x = add_indicators(frame).dropna(subset=["Close", "MA20"]).copy()
+        if len(x) < 25:
             continue
+        recent4 = x["Close"].tail(4)
+        if len(recent4) < 4 or not recent4.iloc[0] > recent4.iloc[1] > recent4.iloc[2] > recent4.iloc[3]:
+            continue
+        last = x.iloc[-1]
         code = ticker.split(".")[0]
-        item["종목"] = name_map.get(code, code)
-        item["코드"] = code
-        chart = item.pop("차트")
-        chart.columns = [item["종목"]]
+        name = name_map.get(code, code)
+        item = {
+            "종목": name,
+            "코드": code,
+            "최근일": x.index[-1].strftime("%Y-%m-%d"),
+            "종가": float(last.Close),
+            "20일 평균선": float(last.MA20),
+            "평균선 대비": float(last.Close / last.MA20 - 1),
+            "최근 4일 하락률": float(last.Close / recent4.iloc[0] - 1),
+        }
+        chart = x[["Close", "MA20"]].tail(60).copy()
+        chart.columns = [f"{name} 종가", f"{name} MA20"]
         chart_frames.append(chart)
         rows.append(item)
     if not rows:
-        raise ValueError("분석 가능한 1년 일봉을 받은 종목이 없습니다.")
-    table = pd.DataFrame(rows).sort_values(["점수", "20일 수익률"], ascending=False).head(10).reset_index(drop=True)
-    selected = set(table["코드"])
-    charts = pd.concat([c for c in chart_frames if c.columns[0] in set(table["종목"])], axis=1).sort_index()
+        return pd.DataFrame(columns=["종목", "코드", "최근일", "종가", "20일 평균선", "평균선 대비", "최근 4일 하락률"]), pd.DataFrame(), max(price_map[t].index.max() for t in price_map).strftime("%Y-%m-%d")
+    table = pd.DataFrame(rows).sort_values("최근 4일 하락률").reset_index(drop=True)
+    selected_names = set(table["종목"])
+    charts = pd.concat([c for c in chart_frames if c.columns[0].replace(" 종가", "") in selected_names], axis=1).sort_index()
     return table, charts, max(price_map[t].index.max() for t in price_map).strftime("%Y-%m-%d")
 
 def resolve_ticker(query: str, universe: pd.DataFrame | None = None) -> tuple[str, str, str]:
@@ -361,32 +339,31 @@ if run_analysis or query:
         st.error(f"데이터를 가져오지 못했습니다: {exc}")
         st.info("임의의 가격 데이터는 사용하지 않았습니다. 인터넷 연결, 종목코드(예: 005930), 데이터 제공처 응답 상태를 확인하세요.")
 
-st.markdown('<div class="section-title">NEXT TRADING DAY TOP 10</div>', unsafe_allow_html=True)
-st.subheader("다음 거래일 관심종목 TOP 10")
-st.caption("최근 장 마감일까지의 1년 일봉을 분석해 기술적 조건 점수가 높은 종목을 표시합니다. 상승을 보장하는 추천이 아니며, 데이터가 늦게 확정되면 기준일이 직전 거래일로 표시됩니다.")
+st.markdown('<div class="section-title">KOSPI DECLINING BELOW MA20</div>', unsafe_allow_html=True)
+st.subheader("코스피 상위 100종목 중 20일 평균선 아래 · 최근 4거래일 연속 하락")
+st.caption("최근 장 마감일까지의 1년 일봉을 기준으로 조건을 동시에 만족하는 종목을 표시합니다. 이는 하락 조건 검색 결과이며 매수·매도 추천이 아닙니다.")
 try:
     with st.spinner("KOSPI100 후보군의 최근 1년 데이터를 분석하고 있습니다..."):
         kospi100, universe_source = load_kospi100_universe()
-        top10, top10_charts, as_of = build_next_day_top10(kospi100)
+        declining, declining_charts, as_of = find_declining_below_ma20(kospi100)
     st.caption(f"기준일: {as_of} · 분석 후보: {len(kospi100)}개 · 종목군 자료원: {universe_source} · 가격 자료원: Yahoo Finance(yfinance)")
-    display_top10 = top10[["종목", "코드", "점수", "의견", "종가", "20일 수익률", "RSI(14)", "거래량/20일평균"]].copy()
-    st.dataframe(
-        display_top10.style.format({
-            "종가": "{:,.0f}원",
-            "20일 수익률": "{:.2%}",
-            "RSI(14)": "{:.1f}",
-            "거래량/20일평균": "{:.2f}배",
-            "점수": "{:.1f}",
-        }),
-        use_container_width=True,
-        hide_index=True,
-    )
-    if not top10_charts.empty:
-        normalized = top10_charts / top10_charts.iloc[0] * 100
-        st.caption("TOP 10 종목의 최근 1년 주가 흐름 비교(각 종목의 시작값=100)")
-        st.line_chart(normalized, height=360, use_container_width=True)
-    st.info("점수는 추세·RSI·MACD·거래량·볼린저 밴드·60일 고점 접근·변동성을 조합한 초기 실험 규칙입니다. 뉴스·공시·실적·갭 하락은 충분히 반영하지 못하므로 실제 매수 전 별도 확인이 필요합니다.")
+    if declining.empty:
+        st.success("현재 조건을 동시에 만족하는 종목이 없습니다.")
+    else:
+        st.dataframe(
+            declining[["종목", "코드", "최근일", "종가", "20일 평균선", "평균선 대비", "최근 4일 하락률"]].style.format({
+                "종가": "{:,.0f}원",
+                "20일 평균선": "{:,.0f}원",
+                "평균선 대비": "{:.2%}",
+                "최근 4일 하락률": "{:.2%}",
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.caption("조건 종목의 최근 60거래일 종가와 20일 이동평균선")
+        st.line_chart(declining_charts, height=380, use_container_width=True)
+    st.info("검색 조건은 ‘최근 종가 < 20일 단순이동평균’ 그리고 ‘최근 4거래일 종가가 매일 전일보다 낮음’입니다. 조건 충족은 추가 하락을 의미하지 않으며, 공시·실적·시장 상황을 별도로 확인해야 합니다.")
 except Exception as exc:
-    st.warning(f"관심종목 TOP 10을 계산하지 못했습니다: {exc}")
-    st.info("임의의 종목이나 가격은 표시하지 않았습니다. 다음 거래일에 다시 실행하거나 데이터 제공처 상태를 확인하세요.")
+    st.warning(f"조건 검색을 계산하지 못했습니다: {exc}")
+    st.info("임의의 종목이나 가격은 표시하지 않았습니다. 잠시 후 다시 실행하거나 데이터 제공처 상태를 확인하세요.")
 
