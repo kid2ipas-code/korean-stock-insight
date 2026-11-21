@@ -246,6 +246,36 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     x["ATR14"] = tr.ewm(alpha=1 / 14, adjust=False).mean()
     return x
 
+def rebound_note(x: pd.DataFrame) -> str:
+    """연속 하락 종목을 초보자용 신호등 문구로 요약합니다. 매수 예측이 아닙니다."""
+    y = x.dropna(subset=["RSI14", "MACD_Hist", "BB_Lower", "Volume_MA20"]).tail(2)
+    if len(y) < 2:
+        return "🟡 조금 더 관찰 · 자료 부족"
+    r, p = y.iloc[-1], y.iloc[-2]
+    positive, negative = [], []
+    if r.RSI14 <= 40 and r.RSI14 > p.RSI14:
+        positive.append("RSI 회복")
+    if r.MACD_Hist > p.MACD_Hist:
+        positive.append("MACD 개선")
+    if r.Close <= r.BB_Lower * 1.03:
+        positive.append("밴드 하단 근처")
+    if r.Close < p.Close and r.Volume < p.Volume:
+        positive.append("하락 거래량 감소")
+    if r.Close < r.MA20:
+        negative.append("20일선 아래")
+    if r.RSI14 < p.RSI14:
+        negative.append("RSI 하락")
+    if r.MACD_Hist < p.MACD_Hist:
+        negative.append("MACD 악화")
+    if r.Close < p.Close and r.Volume > r.Volume_MA20:
+        negative.append("거래량 동반 하락")
+    if len(positive) >= 2 and len(positive) > len(negative):
+        return f"🟢 반등 기대 · {', '.join(positive[:2])}"
+    if len(negative) >= 2 and len(negative) > len(positive):
+        return f"🔴 추가 하락 주의 · {', '.join(negative[:2])}"
+    detail = ", ".join((positive + negative)[:2]) or "뚜렷한 신호 부족"
+    return f"🟡 조금 더 관찰 · {detail}"
+
 def verdict(x: pd.DataFrame) -> tuple[str, float, list[str]]:
     y = x.dropna().iloc[-2:]
     r, p = y.iloc[-1], y.iloc[-2]
