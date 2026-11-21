@@ -161,6 +161,7 @@ def find_declining_below_ma20(kospi100: pd.DataFrame) -> tuple[pd.DataFrame, pd.
             "평균선 대비": float(last.Close / last.MA20 - 1),
             "최근 4일 하락률": float(last.Close / recent4.iloc[0] - 1),
             "연속 하락일수": int(consecutive_down_days),
+                        "반등 참고 신호": rebound_note(x),
         }
         chart = x[["Close", "MA20"]].tail(60).copy()
         chart.columns = [f"{name} 종가", f"{name} MA20"]
@@ -388,7 +389,7 @@ try:
         st.success("현재 조건을 동시에 만족하는 종목이 없습니다.")
     else:
         st.dataframe(
-            declining[["종목", "코드", "최근일", "종가", "20일 평균선", "평균선 대비", "최근 4일 하락률", "연속 하락일수"]].style.format({
+            declining[["종목", "코드", "최근일", "종가", "20일 평균선", "평균선 대비", "최근 4일 하락률", 
                 "종가": "{:,.0f}원",
                 "20일 평균선": "{:,.0f}원",
                 "평균선 대비": "{:.2%}",
