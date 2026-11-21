@@ -143,6 +143,12 @@ def find_declining_below_ma20(kospi100: pd.DataFrame) -> tuple[pd.DataFrame, pd.
         recent4 = x["Close"].tail(4)
         if len(recent4) < 4 or not recent4.iloc[0] > recent4.iloc[1] > recent4.iloc[2] > recent4.iloc[3]:
             continue
+        consecutive_down_days = 1
+        for i in range(len(x) - 1, 0, -1):
+            if x["Close"].iloc[i] < x["Close"].iloc[i - 1]:
+                consecutive_down_days += 1
+            else:
+                break
         last = x.iloc[-1]
         code = ticker.split(".")[0]
         name = name_map.get(code, code)
@@ -154,13 +160,14 @@ def find_declining_below_ma20(kospi100: pd.DataFrame) -> tuple[pd.DataFrame, pd.
             "20일 평균선": float(last.MA20),
             "평균선 대비": float(last.Close / last.MA20 - 1),
             "최근 4일 하락률": float(last.Close / recent4.iloc[0] - 1),
+            "연속 하락일수": int(consecutive_down_days),
         }
         chart = x[["Close", "MA20"]].tail(60).copy()
         chart.columns = [f"{name} 종가", f"{name} MA20"]
         chart_frames.append(chart)
         rows.append(item)
     if not rows:
-        return pd.DataFrame(columns=["종목", "코드", "최근일", "종가", "20일 평균선", "평균선 대비", "최근 4일 하락률"]), pd.DataFrame(), max(price_map[t].index.max() for t in price_map).strftime("%Y-%m-%d")
+        return pd.DataFrame(columns=["종목", "코드", "최근일", "종가", "20일 평균선", "평균선 대비", "최근 4일 하락률", "연속 하락일수"]), pd.DataFrame(), max(price_map[t].index.max() for t in price_map).strftime("%Y-%m-%d")
     table = pd.DataFrame(rows).sort_values("최근 4일 하락률").reset_index(drop=True)
     selected_names = set(table["종목"])
     charts = pd.concat([c for c in chart_frames if c.columns[0].replace(" 종가", "") in selected_names], axis=1).sort_index()
@@ -351,11 +358,12 @@ try:
         st.success("현재 조건을 동시에 만족하는 종목이 없습니다.")
     else:
         st.dataframe(
-            declining[["종목", "코드", "최근일", "종가", "20일 평균선", "평균선 대비", "최근 4일 하락률"]].style.format({
+            declining[["종목", "코드", "최근일", "종가", "20일 평균선", "평균선 대비", "최근 4일 하락률", "연속 하락일수"]].style.format({
                 "종가": "{:,.0f}원",
                 "20일 평균선": "{:,.0f}원",
                 "평균선 대비": "{:.2%}",
                 "최근 4일 하락률": "{:.2%}",
+                "연속 하락일수": "{}일",
             }),
             use_container_width=True,
             hide_index=True,
